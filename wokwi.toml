@@ -1,0 +1,4 @@
+[wokwi]
+version=1
+firmware='build/alarm-clock.ino.hex'
+elf='build/alarm-clock.ino.elf'

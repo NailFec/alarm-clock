@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "author": "Uri Shaked",
+  "author": "NailFec, Uri Shaked",
   "editor": "wokwi",
   "parts": [
     {
@@ -13,22 +13,13 @@
       "attrs": { "commonPin": "anode", "digits": "4", "colon": "1" }
     },
     {
-      "type": "wokwi-buzzer",
-      "id": "buzzer1",
-      "top": 190.17,
-      "left": 466.82,
-      "rotate": 90,
-      "hide": false,
-      "attrs": {}
-    },
-    {
       "type": "wokwi-pushbutton",
       "id": "pushbutton1",
       "top": 110,
       "left": 300,
       "rotate": 0,
       "hide": false,
-      "attrs": { "label": "Hours", "color": "green" }
+      "attrs": { "label": "Study", "color": "green" }
     },
     {
       "type": "wokwi-pushbutton",
@@ -37,7 +28,7 @@
       "left": 380,
       "rotate": 0,
       "hide": false,
-      "attrs": { "label": "Minutes", "color": "green" }
+      "attrs": { "label": "Rest", "color": "green" }
     },
     {
       "type": "wokwi-pushbutton",
@@ -46,7 +37,7 @@
       "left": 460,
       "rotate": 0,
       "hide": false,
-      "attrs": { "label": "Alarm" }
+      "attrs": { "label": "Result" }
     },
     {
       "type": "wokwi-ds1307",

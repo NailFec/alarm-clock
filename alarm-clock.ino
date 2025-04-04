@@ -1,208 +1,263 @@
-#include <SevSeg.h> // 包含 SevSeg 库，用于显示数字。
-#include "Button.h" // 包含 Button 库，用于处理按键输入。
-#include "AlarmTone.h" // 包含 AlarmTone 库，用于播放警报音效。
-#include "Clock.h" // 包含 Clock 库，用于管理时间、闹钟等功能。
-#include "config.h" // 包含配置信息，例如显示类型、按键引脚等。
+#include <SevSeg.h>
+#include "Button.h" // Assuming this library handles debouncing and press detection
+#include "Clock.h"  // Assuming this library provides time via clock.now()
+#include "config.h" // Assuming this contains DISPLAY_TYPE and potentially other SevSeg configs
 
-const int COLON_PIN = 13; // 定义冒号的引脚为 13 号引脚。
-const int SPEAKER_PIN = A3; // 定义扬声器的引脚为 A3 号引脚。
+// --- Pin Definitions (Keep consistency with original if hardware is unchanged) ---
+const int COLON_PIN = 13;
+// const int SPEAKER_PIN = A3; // No longer needed for speaker
 
-Button hourButton(A0); // 创建一个小时按键对象，连接到 A0 引脚。
-Button minuteButton(A1); // 创建一个分钟按键对象，连接到 A1 引脚。
-Button alarmButton(A2); // 创建一个闹钟按键对象，连接到 A2 引脚。
+// --- Button Definitions ---
+// Button 1: Study Start/Stop
+Button studyButton(A0);
+// Button 2: Rest Start/Stop
+Button restButton(A1);
+// Button 3: Review Totals
+Button reviewButton(A2);
 
-AlarmTone alarmTone; // 创建 AlarmTone 对象，用于播放警报音效。
-Clock clock; // 创建 Clock 对象，用于管理时间、闹钟等功能。
-SevSeg sevseg; // 创建 SevSeg 对象，用于显示数字。
+// --- Clock and Display Objects ---
+Clock clock;      // For getting current time in DEFAULT mode
+SevSeg sevseg;    // For controlling the 7-segment display
 
-enum DisplayState {
-  DisplayClock, // 显示当前时间
-  DisplayAlarmStatus, // 显示闹钟状态（开启/关闭）
-  DisplayAlarmTime, // 显示闹钟时间
-  DisplayAlarmActive, // 闹钟正在响
-  DisplaySnooze, // 显示睡眠模式
+// --- State Machine Definition ---
+enum Mode {
+  MODE_DEFAULT, // Displaying current time
+  MODE_STUDY,   // Timing a study session
+  MODE_REST,    // Timing a rest session
+  MODE_REVIEW   // Displaying total study/rest times
 };
+Mode currentMode = MODE_DEFAULT;
+Mode previousMode = MODE_DEFAULT; // To know which timer to add to
+long lastStateChange = 0;         // For timing in REVIEW mode
 
-DisplayState displayState = DisplayClock; // 初始化显示状态为当前时间显示。
-long lastStateChange = 0; // 保存上次状态改变的时间戳，用于计算时间间隔。
+// --- Timer Variables ---
+unsigned long timerStartTime = 0;      // Stores millis() when a timer starts
+unsigned long totalStudyTimeMs = 0;    // Accumulates total study time in milliseconds
+unsigned long totalRestTimeMs = 0;     // Accumulates total rest time in milliseconds
 
-// 函数：changeDisplayState
-// 功能：更改显示状态并记录下状态改变的时间。
-void changeDisplayState(DisplayState newValue) {
-  displayState = newValue; // 设置当前显示状态为新的状态值。
-  lastStateChange = millis(); // 记录下状态改变的时间戳。
+// --- Constants ---
+const unsigned long REVIEW_DISPLAY_DURATION = 2000; // Display each total for 2 seconds
+
+// === Helper Functions ===
+
+// Function to change state and record time
+void changeMode(Mode newMode) {
+  if (currentMode != newMode) { // Prevent resetting timer if mode doesn't actually change
+     previousMode = currentMode; // Store where we came from before changing
+     currentMode = newMode;
+     lastStateChange = millis();
+     Serial.print("Changing mode to: "); Serial.println(newMode); // Debugging
+  }
 }
 
-// 函数：millisSinceStateChange
-// 功能：计算自上次状态改变以来经过的毫秒数。
+// Get milliseconds since last state change
 long millisSinceStateChange() {
-  return millis() - lastStateChange; // 返回当前时间与上次状态改变时间的差值，即经过的时间。
+  return millis() - lastStateChange;
 }
 
-// 函数：setColon
-// 功能：设置冒号引脚的状态（高电平或低电平），用于显示冒号。
-void setColon(bool value) {
-  digitalWrite(COLON_PIN, value ? LOW : HIGH); // 根据value的值，将COLON_PIN设置为LOW或HIGH。
+// Control the colon LED
+void setColon(bool on) {
+  // Assuming LOW turns the LED ON for your setup, adjust if needed
+  digitalWrite(COLON_PIN, on ? LOW : HIGH);
 }
 
-// 函数：displayTime
-// 功能：显示当前时间（小时和分钟）。
-void displayTime() {
-  DateTime now = clock.now(); // 获取当前的 DateTime 对象。
-  bool blinkState = now.second() % 2 == 0; // 判断秒针是否闪烁，如果秒数是偶数则闪烁，否则不闪烁。
-  sevseg.setNumber(now.hour() * 100 + now.minute()); // 设置 SevSeg 显示的数字为小时乘以100加上分钟。
-  setColon(blinkState); // 设置冒号的状态，根据秒针是否闪烁来决定。
+// Display HH:MM from Clock
+void displayCurrentTime() {
+  DateTime now = clock.now();
+  int displayValue = now.hour() * 100 + now.minute();
+  bool blinkState = (now.second() % 2 == 0); // Blink colon every second
+
+  sevseg.setNumber(displayValue, -1); // Display HHMM, -1 means no decimal point forced
+  setColon(blinkState);
 }
 
-// 函数：clockState
-// 功能：处理时间调整和闹钟控制逻辑。
-void clockState() {
-  displayTime(); // 显示当前时间。
+// Display MM:SS from elapsed milliseconds
+void displayTimer(unsigned long elapsedMillis) {
+  unsigned long totalSeconds = elapsedMillis / 1000;
+  int minutes = totalSeconds / 60;
+  int seconds = totalSeconds % 60;
+  // Prevent display overflow if timer runs > 99 minutes 59 seconds
+  minutes = constrain(minutes, 0, 99);
 
-  if (alarmButton.read() == Button::RELEASED && clock.alarmActive()) {
-    // 如果按下闹钟按键且闹钟正在响，则执行以下操作：
-    alarmButton.has_changed(); // 清除按键的状态，确保下次读取时状态正确。
-    changeDisplayState(DisplayAlarmActive); // 更改显示状态为闹钟正在响状态。
-    return; // 返回函数，防止继续执行后续代码。
-  }
+  int displayValue = minutes * 100 + seconds;
+  bool blinkState = (totalSeconds % 2 == 0); // Blink colon while timer runs
 
-  if (hourButton.pressed()) {
-    clock.incrementHour(); // 如果按下小时按键，则增加小时值。
-  }
-  if (minuteButton.pressed()) {
-    clock.incrementMinute(); // 如果按下分钟按键，则增加分钟值。
-  }
-  if (alarmButton.pressed()) {
-    clock.toggleAlarm(); // 如果按下闹钟按键，则切换闹钟状态（开启/关闭）。
-    changeDisplayState(DisplayAlarmStatus); // 更改显示状态为闹钟状态显示。
-  }
+  sevseg.setNumber(displayValue, 2); // Display MMSS, force decimal/colon at position 2 (between MM and SS) - SevSeg handles colon display if setup correctly, otherwise use setColon. Let's use setColon.
+  sevseg.setNumber(displayValue, -1); // Display MMSS
+  setColon(blinkState); // Manually blink colon
 }
 
-// 函数：alarmStatusState
-// 功能：显示闹钟的开启或关闭状态。
-void alarmStatusState() {
-  setColon(false); // 关闭冒号。
-  sevseg.setChars(clock.alarmEnabled() ? " on" : " off"); // 根据闹钟是否开启，设置 SevSeg 显示的字符为 "on" 或 "off"。
-  if (millisSinceStateChange() > ALARM_STATUS_DISPLAY_TIME) {
-    changeDisplayState(clock.alarmEnabled() ? DisplayAlarmTime : DisplayClock); // 如果自上次状态改变以来经过的时间大于 ALARM_STATUS_DISPLAY_TIME，则更改显示状态为闹钟时间或当前时间。
-    return; // 返回函数，防止继续执行后续代码。
-  }
+// Display total time (in minutes)
+void displayTotalMinutes(unsigned long totalMillis) {
+    unsigned long minutes = totalMillis / 60000; // Convert ms to minutes
+    minutes = constrain(minutes, 0, 9999); // Limit to 4 digits
+    sevseg.setNumber(minutes, -1); // Display total minutes
+    setColon(false); // Colon off during review
 }
 
-// 函数：alarmTimeState
-// 功能：显示闹钟时间（小时和分钟）。
-void alarmTimeState() {
-  DateTime alarm = clock.alarmTime(); // 获取闹钟时间。
-  sevseg.setNumber(alarm.hour() * 100 + alarm.minute(), -1); // 设置 SevSeg 显示的数字为闹钟小时乘以100加上闹钟分钟。
+// === State Handling Functions ===
 
-  if (millisSinceStateChange() > ALARM_HOUR_DISPLAY_TIME || alarmButton.pressed()) {
-    changeDisplayState(DisplayClock); // 如果自上次状态改变以来经过的时间大于 ALARM_HOUR_DISPLAY_TIME 或者按下闹钟按键，则更改显示状态为当前时间。
-    return; // 返回函数，防止继续执行后续代码。
+// Handle Default Mode: Show time, check for button presses to start timers or review
+void handleDefaultMode() {
+  displayCurrentTime();
+
+  if (studyButton.pressed()) {
+    timerStartTime = millis(); // Reset and start timer
+    changeMode(MODE_STUDY);
+    return; // Exit after mode change
   }
 
-  if (hourButton.pressed()) {
-    clock.incrementAlarmHour(); // 如果按下小时按键，则增加闹钟小时值。
-    lastStateChange = millis(); // 更新上次状态改变的时间戳。
+  if (restButton.pressed()) {
+    timerStartTime = millis(); // Reset and start timer
+    changeMode(MODE_REST);
+    return; // Exit after mode change
   }
-  if (minuteButton.pressed()) {
-    clock.incrementAlarmMinute(); // 如果按下分钟按键，则增加闹钟分钟值。
-    lastStateChange = millis(); // 更新上次状态改变的时间戳。
-  }
-  if (alarmButton.pressed()) {
-    changeDisplayState(DisplayClock); // 如果按下闹钟按键，则更改显示状态为当前时间。
+
+  if (reviewButton.pressed()) {
+    changeMode(MODE_REVIEW);
+    return; // Exit after mode change
   }
 }
 
-// 函数：alarmState
-// 功能：处理闹钟响铃和睡眠模式逻辑。
-void alarmState() {
-  displayTime(); // 显示当前时间。
+// Handle Study Mode: Show timer, check for button press to stop
+void handleStudyMode() {
+  unsigned long elapsed = millis() - timerStartTime;
+  displayTimer(elapsed);
 
-  if (alarmButton.read() == Button::RELEASED) {
-    alarmTone.play(); // 如果按下闹钟按键且松开，则播放警报音效。
+  // Buttons 1 or 2 stop the timer
+  if (studyButton.pressed() || restButton.pressed()) {
+    unsigned long sessionDuration = millis() - timerStartTime;
+    totalStudyTimeMs += sessionDuration;
+    Serial.print("Stopped Study. Duration: "); Serial.print(sessionDuration / 1000); Serial.println("s");
+    Serial.print("Total Study Time: "); Serial.print(totalStudyTimeMs / 1000); Serial.println("s");
+    changeMode(MODE_DEFAULT);
+    return;
   }
-  if (alarmButton.pressed()) {
-    alarmTone.stop(); // 如果按下闹钟按键，则停止警报音效。
+   // Button 3 (Review) does nothing in this mode
+   if (reviewButton.pressed()) {
+     // Optional: Add a small visual cue or sound that it's ignored?
+   }
+}
+
+// Handle Rest Mode: Show timer, check for button press to stop
+void handleRestMode() {
+  unsigned long elapsed = millis() - timerStartTime;
+  displayTimer(elapsed);
+
+  // Buttons 1 or 2 stop the timer
+  if (studyButton.pressed() || restButton.pressed()) {
+    unsigned long sessionDuration = millis() - timerStartTime;
+    totalRestTimeMs += sessionDuration;
+    Serial.print("Stopped Rest. Duration: "); Serial.print(sessionDuration / 1000); Serial.println("s");
+    Serial.print("Total Rest Time: "); Serial.print(totalRestTimeMs / 1000); Serial.println("s");
+    changeMode(MODE_DEFAULT);
+    return;
   }
-  if (alarmButton.released()) {
-    alarmTone.stop(); // 确保警报音效已停止。
-    bool longPress = alarmButton.repeat_count() > 0; // 检查是否长时间按下闹钟按键。
-    if (longPress) {
-      clock.stopAlarm(); // 如果长时间按下，则停止闹钟。
-      changeDisplayState(DisplayClock); // 更改显示状态为当前时间。
+   // Button 3 (Review) does nothing in this mode
+   if (reviewButton.pressed()) {
+     // Optional: Add a small visual cue or sound that it's ignored?
+   }
+}
+
+// Handle Review Mode: Show totals sequentially then return to default
+void handleReviewMode() {
+  unsigned long timeInState = millisSinceStateChange();
+
+  if (timeInState < REVIEW_DISPLAY_DURATION) {
+    // Phase 1: Show "StdY" (or similar) then total study minutes
+    if (timeInState < 500) { // Show label briefly
+        sevseg.setChars("StdY");
+        setColon(false);
     } else {
-      clock.snooze(); // 否则进入睡眠模式。
-      changeDisplayState(DisplaySnooze); // 更改显示状态为睡眠模式。
+        displayTotalMinutes(totalStudyTimeMs);
     }
+  } else if (timeInState < (REVIEW_DISPLAY_DURATION * 2)) {
+    // Phase 2: Show "rESt" (or similar) then total rest minutes
+     if (timeInState < (REVIEW_DISPLAY_DURATION + 500)) { // Show label briefly
+        sevseg.setChars("rESt");
+        setColon(false);
+    } else {
+        displayTotalMinutes(totalRestTimeMs);
+    }
+  } else {
+    // Phase 3: Return to default mode
+    changeMode(MODE_DEFAULT);
   }
 }
 
-// 函数：snoozeState
-// 功能：显示睡眠模式状态。
-void snoozeState() {
-  sevseg.setChars("****"); // 设置 SevSeg 显示的字符为 "****"。
-  if (millisSinceStateChange() > SNOOZE_DISPLAY_TIME) {
-    changeDisplayState(DisplayClock); // 如果自上次状态改变以来经过的时间大于 SNOOZE_DISPLAY_TIME，则更改显示状态为当前时间。
-    return; // 返回函数，防止继续执行后续代码。
-  }
-}
 
-// 函数：setup
-// 功能：初始化硬件和设置参数。
+// === Arduino Standard Functions ===
+
 void setup() {
-  Serial.begin(115200); // 初始化串口通信。
+  Serial.begin(115200);
+  Serial.println("Study/Rest Timer Starting...");
 
-  clock.begin(); // 初始化 Clock 对象。
+  // Initialize Clock (essential for default mode)
+  clock.begin();
 
-  hourButton.begin(); // 初始化小时按键对象，并设置重复间隔。
-  hourButton.set_repeat(500, 200); // 设置小时按键的重复间隔为 500ms (触发) 和 200ms (恢复)。
+  // Initialize Buttons
+  studyButton.begin();
+  restButton.begin();
+  reviewButton.begin();
+  // Remove or adjust repeat/long press if not needed for new logic
+  // studyButton.set_repeat(500, 200);
+  // restButton.set_repeat(500, 200);
+  // reviewButton.set_repeat(1000, -1); // Maybe keep long press for a reset function later? For now, disable.
 
-  minuteButton.begin(); // 初始化分钟按键对象，并设置重复间隔。
-  minuteButton.set_repeat(500, 200); // 设置分钟按键的重复间隔为 500ms (触发) 和 200ms (恢复)。
+  // Initialize Colon Pin
+  pinMode(COLON_PIN, OUTPUT);
+  digitalWrite(COLON_PIN, HIGH); // Start with colon off
 
-  alarmButton.begin(); // 初始化闹钟按键对象，并设置重复间隔。
-  alarmButton.set_repeat(1000, -1); // 设置闹钟按键的重复间隔为 1000ms (触发)，-1 表示不恢复。
+  // Initialize SevSeg Display (Use settings from original code/config.h)
+  byte digits = 4;
+  // --- Ensure these match your hardware ---
+  byte digitPins[] = {2, 3, 4, 5};
+  byte segmentPins[] = {6, 7, 8, 9, 10, 11, 12};
+  bool resistorsOnSegments = false; // Change if your setup differs
+  //bool updateWithDelays = false; // Not recommended with frequent refreshes
+  bool leadingZeros = true;      // Keep HH:MM and MM:SS looking right
+  bool disableDecPoint = true;   // We use the colon pin instead
+  // --- Get DISPLAY_TYPE from config.h or define directly ---
+  // Example: byte displayType = COMMON_CATHODE;
+  // Ensure DISPLAY_TYPE is defined correctly in config.h or replace it here.
+  #ifndef DISPLAY_TYPE
+    #define DISPLAY_TYPE COMMON_CATHODE // Provide a default if not in config.h
+    Serial.println("Warning: DISPLAY_TYPE not defined in config.h, defaulting to COMMON_CATHODE");
+  #endif
 
-  alarmTone.begin(SPEAKER_PIN); // 初始化 AlarmTone 对象，并指定扬声器引脚。
-
-  pinMode(COLON_PIN, OUTPUT); // 将冒号引脚设置为输出模式。
-
-  byte digits = 4; // 设置数字位数
-  byte digitPins[] = {2, 3, 4, 5}; // 数字显示管的引脚连接
-  byte segmentPins[] = {6, 7, 8, 9, 10, 11, 12}; // 数字显示管的段线连接
-  bool resistorsOnSegments = false; // 是否使用段线电阻
-  bool updateWithDelays = false; // 是否使用延时更新
-  bool leadingZeros = true; // 是否在数字前面添加零
-  bool disableDecPoint = true; // 是否禁用小数点显示
   sevseg.begin(DISPLAY_TYPE, digits, digitPins, segmentPins, resistorsOnSegments,
-               updateWithDelays, leadingZeros, disableDecPoint); // 初始化 SevSeg 对象。
-  sevseg.setBrightness(90); // 设置显示亮度。
+               false /*updateWithDelays*/, leadingZeros, disableDecPoint);
+  sevseg.setBrightness(90); // Adjust brightness as needed
+
+  Serial.println("Setup complete.");
+  changeMode(MODE_DEFAULT); // Start in default mode explicitly
 }
 
-// 函数：loop
-// 功能：循环执行程序逻辑。
 void loop() {
-  sevseg.refreshDisplay(); // 刷新数字显示管的显示内容。
+  // IMPORTANT: Refresh display very frequently for multiplexing
+  sevseg.refreshDisplay();
 
-  switch (displayState) {
-    case DisplayClock: // 如果当前显示状态为当前时间显示，则调用 clockState 函数。
-      clockState();
+  // Update button states (assuming Button library requires this)
+  // If your Button library handles this internally, you might not need these calls.
+  // Check the Button library documentation. Let's assume they are needed.
+  studyButton.read();
+  restButton.read();
+  reviewButton.read();
+
+
+  // Process current mode logic
+  switch (currentMode) {
+    case MODE_DEFAULT:
+      handleDefaultMode();
       break;
-
-    case DisplayAlarmStatus: // 如果当前显示状态为闹钟状态显示，则调用 alarmStatusState 函数。
-      alarmStatusState();
+    case MODE_STUDY:
+      handleStudyMode();
       break;
-
-    case DisplayAlarmTime: // 如果当前显示状态为闹钟时间显示，则调用 alarmTimeState 函数。
-      alarmTimeState();
+    case MODE_REST:
+      handleRestMode();
       break;
-
-    case DisplayAlarmActive: // 如果当前显示状态为闹钟正在响显示，则调用 alarmState 函数。
-      alarmState();
-      break;
-
-    case DisplaySnooze: // 如果当前显示状态为睡眠模式显示，则调用 snoozeState 函数。
-      snoozeState();
+    case MODE_REVIEW:
+      handleReviewMode();
       break;
   }
 }

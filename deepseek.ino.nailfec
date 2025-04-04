@@ -1,0 +1,142 @@
+#include <SevSeg.h>
+#include "Button.h"
+#include "config.h"
+
+const int COLON_PIN = 13;
+
+Button btn1(A0);  // 按钮1
+Button btn2(A1);  // 按钮2
+Button btn3(A2);  // 按钮3
+
+SevSeg sevseg;
+
+enum AppState {
+  DEFAULT,
+  STUDY,
+  REST,
+  REVIEW
+};
+
+AppState currentState = DEFAULT;
+unsigned long stateStartTime = 0;
+unsigned long timerStart = 0;
+unsigned long totalStudy = 0;  // 学习总用时（秒）
+unsigned long totalRest = 0;    // 休息总用时（秒）
+
+void setup() {
+  Serial.begin(115200);
+  
+  // 初始化按钮
+  btn1.begin();
+  btn2.begin();
+  btn3.begin();
+
+  // 初始化数码管
+  byte digits = 4;
+  byte digitPins[] = {2, 3, 4, 5};
+  byte segmentPins[] = {6, 7, 8, 9, 10, 11, 12};
+  bool resistorsOnSegments = false;
+  sevseg.begin(COMMON_CATHODE, digits, digitPins, segmentPins, resistorsOnSegments);
+  sevseg.setBrightness(90);
+  
+  pinMode(COLON_PIN, OUTPUT);
+}
+
+void updateDisplay(int value, bool showColon) {
+  sevseg.setNumber(value, showColon ? 2 : -1);
+  digitalWrite(COLON_PIN, showColon ? HIGH : LOW);
+}
+
+void handleDefaultState() {
+  // 模拟显示当前时间（这里用递增数字演示）
+  static unsigned long fakeTime = 0;
+  if(millis() - stateStartTime > 1000) {
+    fakeTime++;
+    stateStartTime = millis();
+  }
+  updateDisplay(fakeTime % 10000, true);
+
+  if(btn1.pressed()) {
+    currentState = STUDY;
+    timerStart = millis();
+  }
+  else if(btn2.pressed()) {
+    currentState = REST;
+    timerStart = millis();
+  }
+  else if(btn3.pressed()) {
+    currentState = REVIEW;
+    stateStartTime = millis();
+  }
+}
+
+void handleTimingState(AppState state) {
+  // 显示计时时间（秒）
+  unsigned long elapsed = (millis() - timerStart) / 1000;
+  updateDisplay(elapsed, false);
+
+  // 任意按钮按下停止计时
+  if(btn1.pressed() || btn2.pressed()) {
+    // 累加计时时间
+    if(state == STUDY) {
+      totalStudy += elapsed;
+    } else {
+      totalRest += elapsed;
+    }
+    currentState = DEFAULT;
+  }
+}
+
+void handleReviewState() {
+  static int phase = 0;
+  
+  switch(phase) {
+    case 0: // 显示学习时间
+      updateDisplay(totalStudy / 60, false); // 显示分钟
+      if(millis() - stateStartTime > 2000) {
+        phase = 1;
+        stateStartTime = millis();
+      }
+      break;
+      
+    case 1: // 显示休息时间
+      updateDisplay(totalRest / 60, false);
+      if(millis() - stateStartTime > 2000) {
+        currentState = DEFAULT;
+        phase = 0;
+      }
+      break;
+  }
+}
+
+void loop() {
+  sevseg.refreshDisplay();
+  
+  // 更新所有按钮状态
+  btn1.read();
+  btn2.read();
+  btn3.read();
+
+  switch(currentState) {
+    case DEFAULT:
+      handleDefaultState();
+      break;
+      
+    case STUDY:
+      handleTimingState(STUDY);
+      break;
+      
+    case REST:
+      handleTimingState(REST);
+      break;
+      
+    case REVIEW:
+      handleReviewState();
+      break;
+  }
+
+  // 在计时模式下忽略按钮3
+  if((currentState == STUDY || currentState == REST) && btn3.pressed()) {
+    btn3.has_changed(); // 清除按钮状态
+  }
+}
